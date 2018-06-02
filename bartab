@@ -1,0 +1,69 @@
+#! /usr/bin/env nqp
+
+say('Hello, world!');
+
+my @a := <one two three four five six>;
+for @a -> $s, $t { say("$s $t") }
+
+my %a;
+%a<a> := 1;
+%a<b> := 'two';
+%a<c> := 3.1415927;
+for %a {
+    say("k: ", $_.key, ", v: ", $_.value);
+}
+
+sub fac(uint $n) {
+    if $n < 0 { nqp::die("fac not defined for negative numbers") }
+    elsif $n == 0 { 1 }
+    else { $n * fac($n - 1) }
+}
+
+for 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 {
+    say("fac(", $_, ") = ", fac($_));
+}
+
+class BarTab {
+    has $!table;
+    has @!items;
+
+    my class Item {
+        has $!name;
+        has $!price;
+        method name() { $!name }
+        method price() { $!price }
+    }
+
+    method table() { $!table }
+
+    proto method add-order($item, $price, $quantity?) { * }
+    multi method add-order($item, $price) {
+        @!items.push: Item.new(name => $item, price => $price);
+    }
+    multi method add-order($item, $price, $quantity) {
+        while $quantity > 0 {
+            self.add-order($item, $price);
+            $quantity := $quantity - 1;
+        }
+    }
+    method render-tab() {
+        my $tab := "Table #$!table\n";
+        my $total := 0;
+        for @!items {
+            $tab := $tab ~ "- " ~ $_.name() ~ ": \$" ~ $_.price() ~ "\n";
+            $total := $total + $_.price();
+        }
+        $tab := $tab ~ "TOTAL: \$$total\n";
+
+        return $tab;
+    }
+}
+
+my $tab := BarTab.new(table => 42);
+$tab.add-order('Fries', 3.85);
+$tab.add-order('Pie', 6.25);
+$tab.add-order('Pint', 4.99, 3);
+print($tab.render-tab());
+
+#:nnoremap <buffer> <Enter> :w<CR> \| :!%:p<CR>
+# vim:ft=perl6 sw=4 ts=8 sts=4 et:

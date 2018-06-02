@@ -1,0 +1,88 @@
+#! /usr/bin/env nqp
+
+use NQPHLL;
+
+grammar PHQ::Grammar is HLL::Grammar {
+    token TOP {
+        ^
+        <.shebang>?
+        <statements>
+        $
+    }
+
+    token shebang { '#!' \N* \n }
+
+    rule statements {
+       [
+           [
+               <statement>+ % ';'
+               ';'?
+           ]?
+           <.eol>+
+       ]*
+    }
+
+    rule statement {
+        'echo'
+        [
+        || <?[(]> '(' <dquoted-string> ')'
+        || <dquoted-string>
+        ]
+    }
+
+    token dquoted-string { <?["]> <quote_EXPR: ':q', ':b'> }
+
+    rule eol {
+        [ '//' \N* ]? \n
+    }
+
+    # Whitespace required between word tokens
+    token ws { <!ww> \h* || \h+ }
+}
+
+class PHQ::Actions is HLL::Actions {
+    method TOP($/) {
+        make QAST::Block.new($<statements>.ast);
+    }
+    method statements($/) {
+        my $stmts := QAST::Stmts.new(:node($/));
+        for $<statement> {
+            $stmts.push($_.ast);
+        }
+        make $stmts;
+    }
+    method statement($/) {
+        make QAST::Op.new(
+            :node($/),
+            :op<print>,
+            $<dquoted-string><quote_EXPR>.ast
+        );
+    }
+}
+
+class PHQ::Compiler is HLL::Compiler {
+    # This avoids passing @args to $output(), which appears to be a
+    # bug in NQP(?). Without this fix, running `./phq test1.phq`
+    # errors with:
+    # Too many positionals passed; expected 0 arguments but got 1
+
+    # Taken from Pull Request #19:
+    # https://github.com/edumentab/rakudo-and-nqp-internals-course/pull/19/commits/f103137e136ffb0dd8014e1ed69e700daac56180
+
+    method eval($code, *@args, *%adverbs) {
+        my $output := self.compile($code, :compunit_ok(1), |%adverbs);
+        $output := self.backend.compunit_mainline($output);
+        $output();
+    }
+}
+
+sub MAIN(*@ARGS) {
+    my $comp := PHQ::Compiler.new();
+    $comp.language('phq');
+    $comp.parsegrammar(PHQ::Grammar);
+    $comp.parseactions(PHQ::Actions);
+    $comp.command_line(@ARGS, :encoding<utf8>, :!rxtrace);
+}
+
+#:nnoremap <buffer> <Enter> :w<CR> \| :!%:p<CR>
+# vim:ft=perl6 sw=4 ts=8 sts=4 et:

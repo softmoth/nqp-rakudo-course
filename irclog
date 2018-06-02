@@ -1,0 +1,90 @@
+#! /usr/bin/env nqp
+
+class Utterance {
+    has $!time;
+    has $!nick;
+    has $!is-action;
+    has @!text;
+
+    method time() { $!time }
+    method nick() { $!nick }
+    method is-action() { $!is-action }
+    method text() { @!text }
+
+    method append($u) {
+        return 0 if
+            $!is-action || $u.is-action
+            || $!nick ne $u.nick
+            || time-diff($!time, $u.time) > 2;
+        for $u.text { @!text.push: $_ }
+        1;
+    }
+
+    sub time-diff($a, $b) {
+        sub time-int($t) {
+            my $m := $t ~~ /^(\d\d)':'(\d\d)$/;
+            return $m[0] * 60 + $m[1];
+        }
+        return nqp::abs_i(time-int($a) - time-int($b));
+    }
+}
+
+grammar IRCLog {
+    token TOP {
+        ^ \n?
+        <entry>* %% \n
+        $
+    }
+    rule entry {
+        <time>
+        <marker>? <nick>
+        <text>
+    }
+    token time { \d\d ':' \d\d }
+    token marker { '*' }
+    token nick { \w+ }
+    token text { \N* }
+    token ws { \h* }
+}
+
+class IRCLogActions {
+    method entry($/) {
+        make Utterance.new(:time(~$<time>), :nick(~$<nick>),
+                :is-action($<marker> eq '*'), :text([~$<text>]));
+    }
+    method TOP($/) {
+        my @log;
+        for $<entry> {
+            @log.push: $_.ast
+                unless @log && @log[nqp::elems(@log)-1].append($_.ast);
+        }
+        make @log;
+    }
+}
+
+#IRCLog.HOW.trace-on(IRCLog);
+
+my $match := IRCLog.parse(Q{
+13:59 colomon     Here, hold my beer....
+14:00 colomon     r: say 2**100
+14:00 camelia     rakudo 624ff7: OUTPUT1267650600228229401496703205376
+14:00 colomon     sweet!!!!!
+14:30 TimToady    foo
+14:30 * TimToady  bet that took a lot of electrons...
+14:30 TimToady    bar
+14:50 TimToady    baz
+}, :actions(IRCLogActions));
+
+if $match {
+    for $match.ast -> $u {
+        say("- {$u.time} {$u.is-action ?? '*' !! '@'}{$u.nick} '{
+            nqp::join("'\n\t{nqp::x(' ', nqp::chars($u.nick)+2)}'", $u.text)
+        }'");
+    }
+}
+else {
+    say("NO MATCH!");
+}
+
+#:nnoremap <buffer> <Enter> :w<CR> \| :!%:p<CR>
+# vim:ft=perl6 sw=4 ts=8 sts=4 et:

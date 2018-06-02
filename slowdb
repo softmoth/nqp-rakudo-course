@@ -1,0 +1,221 @@
+#! /usr/bin/env nqp
+
+grammar QueryParser {
+    token TOP { ^ <query> $ }
+
+    proto token query {*}
+    rule query:sym<insert> {
+        'INSERT' <pairlist>
+    }
+    rule query:sym<select> {
+        'SELECT' <keylist>
+        <where-clause>?
+    }
+    rule query:sym<delete> {
+        'DELETE'
+        <where-clause>
+    }
+    rule query:sym<update> {
+        'UPDATE'
+        <where-clause>
+        'SET' <pairlist>
+    }
+    rule where-clause {
+        'WHERE' <wherelist>
+    }
+
+    rule pairlist { <pair>+ % [ ',' ] }
+    rule pair { <key> '=' <value> }
+    rule keylist { <key>+ % [ ',' ] }
+    token key { \w+ }
+
+    rule wherelist { <wherecond>+ % [ ',' ] }
+    rule wherecond { <key> <op> <value> }
+    proto token op {*}
+    token op:sym<< =  >> { <sym> }
+    token op:sym<< != >> { <sym> }
+    token op:sym<< <  >> { <sym> }
+    token op:sym<< <= >> { <sym> }
+    token op:sym<< >  >> { <sym> }
+    token op:sym<< >= >> { <sym> }
+
+    proto token value {*}
+    token value:sym<integer> { \d+ }
+    token value:sym<string> { \' <( <-[']>+ )> \' }
+
+}
+
+class QueryActions {
+    method TOP($/) {
+        make $<query>.ast;
+    }
+
+    method query:sym<insert>($/) {
+        my %to_insert := $<pairlist>.ast;
+        make -> @db {
+            @db.push: %to_insert;
+            [nqp::hash('result', 'Inserted 1 row' )]
+        };
+    }
+
+    sub where-filter(@db, $where) {
+        my @where;
+        @where := $where.ast if $where;
+        my @match;
+        my $ix := -1;
+        for @db -> $row {
+            $ix := $ix + 1;
+
+            my $skip := 0;
+            for @where -> $w {
+                my $k := $w[0];
+                my $op := $w[1];
+                my $v := $w[2];
+                #note("?$ix $k[$v] * '{$row{$k}}'");
+                unless $op($row{$k}, $v) {
+                    $skip := 1;
+                    last;
+                }
+            }
+            next if $skip;
+
+            # All WHERE conditions match
+            @match.push: $ix;
+        }
+        return @match;
+    }
+
+    method where-clause($/) {
+        my @conds;
+        for $<wherelist><wherecond> -> $c {
+            @conds.push: [ ~$c<key>, $c<op>.ast, $c<value>.ast ];
+        }
+        make @conds;
+    }
+
+    # Treat everything like strings for now
+    method op:sym<< =  >>($/) { make -> $a, $b { $a eq $b }; }
+    method op:sym<< != >>($/) { make -> $a, $b { $a ne $b }; }
+    method op:sym<< <  >>($/) { make -> $a, $b { $a lt $b }; }
+    method op:sym<< <= >>($/) { make -> $a, $b { $a le $b }; }
+    method op:sym<< >  >>($/) { make -> $a, $b { $a gt $b }; }
+    method op:sym<< >= >>($/) { make -> $a, $b { $a ge $b }; }
+
+    method query:sym<select>($/) {
+        my @select := $<keylist>.ast;
+        make -> @db {
+            my @results;
+            for where-filter(@db, $<where-clause>) -> $ix {
+                my $row := @db[$ix];
+                my %row;
+                for @select -> $s {
+                    if nqp::existskey($row, $s) {
+                        %row{$s} := $row{$s};
+                    }
+                }
+                @results.push: %row;
+            }
+            @results
+        };
+    }
+
+    method query:sym<delete>($/) {
+        make -> @db {
+            my @del := where-filter(@db, $<where-clause>);
+            # Reverse @del so lower indexes are stable while
+            # deleting higher elements
+            my $i := nqp::elems(@del);
+            while $i > 0 {
+                $i := $i - 1;
+                nqp::splice(@db, [], @del[$i], 1);
+            }
+            [nqp::hash('result', "Deleted {+@del} row(s)" )]
+        };
+    }
+
+    method query:sym<update>($/) {
+        my %update := $<pairlist>.ast;
+        my $count := 0;
+        make -> @db {
+            for where-filter(@db, $<where-clause>) -> $ix {
+                my $row := @db[$ix];
+                for %update -> $u {
+                    $row{$u.key} := $u.value;
+                }
+                $count := $count + 1;
+            }
+            [nqp::hash('result', "Updated $count row(s)" )]
+        };
+    }
+
+    method value:sym<integer>($/) { make +$/ }
+    method value:sym<string>($/) { make ~$/ }
+
+    method pairlist($/) {
+        my %pairs;
+        for $<pair> -> $p {
+            %pairs{$p<key>} := $p<value>.ast;
+        }
+        make %pairs;
+    }
+    method keylist($/) {
+        my @keys;
+        for $<key> -> $k {
+            @keys.push: ~$k;
+        }
+        make @keys;
+    }
+}
+
+class SlowDB {
+    has @!data;
+    method execute($query) {
+        if QueryParser.parse($query, :actions(QueryActions)) -> $parsed {
+            my $evaluator := $parsed.ast;
+            #note("# PARSED »$parsed«");
+            if $evaluator(@!data) -> @results {
+                say("# QUERY »$parsed«");
+                for @results -> %data {
+                    print("[ ");
+                    print("{$_.key}: {$_.value}; ") for %data;
+                    say("]");
+                }
+            } else {
+                say("Nothing found");
+            }
+        } else {
+            say('Syntax error in query');
+        }
+        #self.dump();
+    }
+    method dump() {
+        say("####");
+        for @!data -> %data {
+            print("- [ ");
+            print("{$_.key}: {$_.value}; ") for %data;
+            say("]");
+        }
+        say("");
+    }
+}
+
+#QueryParser.HOW.trace-on(QueryParser);
+my $db := SlowDB.new();
+$db.execute(Q{INSERT name = 'a', age = 1});
+$db.execute(Q{INSERT name = 'b', age = 2, d = 1});
+$db.execute(Q{INSERT name = 'c', age = 3});
+$db.execute(Q{INSERT name = 'd', age = 4});
+$db.execute(Q{INSERT name = 'e', age = 5, d = 1});
+$db.execute(Q{INSERT name = 'f', age = 6, d = 1});
+$db.execute(Q{INSERT name = 'g', age = 7});
+$db.execute(Q{INSERT name = 'h', age = 8});
+$db.execute(Q{INSERT name = 'i', age = 9});
+$db.execute(Q{SELECT name, age, updated, d});
+$db.execute(Q{DELETE WHERE d = 1, age >=5});
+$db.execute(Q{UPDATE WHERE age < 5 SET name = 'A', updated = 1});
+$db.execute(Q{UPDATE WHERE age >= 8 SET name = 'H', updated = 1});
+$db.execute(Q{SELECT name, age, updated, d WHERE updated = 1});
+$db.execute(Q{SELECT name, age, updated, d});
+
+#:nnoremap <buffer> <Enter> :w<CR> \| :!%:p<CR>
+# vim:ft=perl6 sw=4 ts=8 sts=4 et:
