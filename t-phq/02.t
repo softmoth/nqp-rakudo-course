@@ -1,6 +1,6 @@
 #! ./phq
 
-echo "1..2\n"
+echo "1..2\n";
 echo( "ok 1\n");  // Wow!
 
 

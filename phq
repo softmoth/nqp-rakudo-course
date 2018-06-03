@@ -4,46 +4,75 @@ use NQPHLL;
 
 grammar PHQ::Grammar is HLL::Grammar {
     token TOP {
+        :my $*CUR-BLOCK := QAST::Block.new: QAST::Stmts.new;
         ^
-        <.shebang>?
+        <.shəbang>?
         <statements>
-        $
+        [ $ || <.panic('Syntax error')> ]
     }
 
-    token shebang { '#!' \N* \n }
+    token shəbang { '#!' \N* \n }
 
     rule statements {
-       [
-           [
-               <statement>+ % ';'
-               ';'?
-           ]?
-           <.eol>+
-       ]*
+       <.ws>
+       <statement>+ % ';'
+       ';'?
     }
 
-    rule statement {
-        'echo'
-        [
-        || <?[(]> '(' <dquoted-string> ')'
-        || <dquoted-string>
+
+    proto token statement {*}
+
+    token statement:sym<EXPR> { <EXPR> }
+
+    rule statement:sym<echo> {
+        <sym> [ <?[(]> '(' <EXPR> ')' || <EXPR> ]
+    }
+
+
+    proto token value {*}
+    token value:sym<string>  { <?["]> <quote_EXPR: ':q', ':b'> }
+    token value:sym<integer> { '-'? \d+ }
+    token value:sym<number>  { '-'? \d+ '.' \d+ }
+
+
+    token term:sym<value> { <value> }
+    token term:sym<var> {
+        :my $*MAYBE-DECL := 0;
+        <varname>
+        [  <?before \h* '=' \h* [ <value> | <identifier> ]
+                { $*MAYBE-DECL := 1 }>
+        || <?>
         ]
     }
+    token varname { '$' <.identifier> }
+    token identifier { <[_ A..Z a..z]> <[_ A..Z a..z 0..9]>* }
 
-    token dquoted-string { <?["]> <quote_EXPR: ':q', ':b'> }
+    # Operators
+    my %multiplicative := nqp::hash('prec', 'u=', 'assoc', 'left');
+    my %additive       := nqp::hash('prec', 't=', 'assoc', 'left');
+    my %concatenation  := nqp::hash('prec', 'r=', 'assoc', 'left');
+    my %assignment     := nqp::hash('prec', 'i=', 'assoc', 'right');
 
-    rule eol {
-        [ '//' \N* ]? \n
-    }
+    token infix:sym<*>    { <sym>  <O(|%multiplicative, :op<mul_n>)> }
+    token infix:sym</>    { <sym>  <O(|%multiplicative, :op<div_n>)> }
+    token infix:sym<%>    { <sym>  <O(|%multiplicative, :op<mod_n>)> }
+    token infix:sym<+>    { <sym>  <O(|%additive,       :op<add_n>)> }
+    token infix:sym<->    { <sym>  <O(|%additive,       :op<sub_n>)> }
+    token infix:sym<.>    { <sym>  <O(|%concatenation,  :op<concat>)> }
+    token infix:sym<=>    { <sym>  <O(|%assignment,     :op<bind>)> }
+
 
     # Whitespace required between word tokens
-    token ws { <!ww> \h* || \h+ }
+    token ws { <!ww> <.white>+ || <.white>* }
+    token white { \s+ || '//' \N+ \n }
 }
 
 class PHQ::Actions is HLL::Actions {
     method TOP($/) {
-        make QAST::Block.new($<statements>.ast);
+        $*CUR-BLOCK.push: $<statements>.ast;
+        make $*CUR-BLOCK;
     }
+
     method statements($/) {
         my $stmts := QAST::Stmts.new(:node($/));
         for $<statement> {
@@ -51,12 +80,34 @@ class PHQ::Actions is HLL::Actions {
         }
         make $stmts;
     }
-    method statement($/) {
-        make QAST::Op.new(
+
+
+    method statement:sym<EXPR>($/) { make $<EXPR>.ast }
+
+    method statement:sym<echo>($/) {
+        make QAST::Op.new:
             :node($/),
             :op<print>,
-            $<dquoted-string><quote_EXPR>.ast
-        );
+            $<EXPR>.ast
+    }
+
+
+    method value:sym<string>($/)  { make $<quote_EXPR>.ast }
+    method value:sym<integer>($/) { make QAST::IVal.new: :value(+~$/) }
+    method value:sym<number>($/)  { make QAST::NVal.new: :value(+~$/) }
+
+
+    method term:sym<value>($/) { make $<value>.ast }
+    method term:sym<var>($/) {
+        my $name := ~$<varname>;
+        my %sym := $*CUR-BLOCK.symbol($name);
+        if $*MAYBE-DECL && !%sym<declared> {
+            $*CUR-BLOCK.symbol($name, :declared);
+            make QAST::Var.new: :$name, :scope<lexical>, :decl<var>;
+        }
+        else {
+            make QAST::Var.new: :$name, :scope<lexical>;
+        }
     }
 }
 
