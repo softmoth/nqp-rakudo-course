@@ -1,24 +1,98 @@
 #! /usr/bin/env nqp
 
 use NQPHLL;
-grammar Rubyish::Grammar is HLL::Grammar {
-    token TOP { <statementlist> }
 
-    rule statementlist { [ <statement> \n+ ]* }
+grammar Rubyish::Grammar is HLL::Grammar {
+    token TOP {
+        :my $*CUR-BLOCK := QAST::Block.new(QAST::Stmts.new());
+        <statementlist>
+        [ $ || <.panic('Syntax error')> ]
+    }
+
+    rule statementlist {
+        [ <statement> \n+ ]*
+    }
 
     proto token statement {*}
-    token statement:sym<puts> {
-        <sym> <.ws> <?["]> <quote_EXPR: ':q'>
+
+    token statement:sym<EXPR> { <EXPR> }
+
+    token statement:sym<def> {
+        'def' \h+ <defbody>
     }
+    rule defbody {
+        :my $*CUR-BLOCK := QAST::Block.new: QAST::Stmts.new;
+        <ident> <signature>? \n+
+        <statementlist>
+        'end'
+    }
+    rule signature {
+        '(' <param>* % [ ',' ] ')'
+    }
+    token param { <ident> }
+
+    token statement:sym<puts> {
+        <sym> <.ws> <EXPR>
+    }
+
+    token term:sym<value> { <value> }
+
+    token term:sym<call> {
+        <!keyword>
+        <ident> '(' :s <EXPR>* % [ ',' ] ')'
+    }
+
+    token term:sym<ident> {
+        :my $*MAYBE-DECL := 0;
+        <!keyword>
+        <ident>
+        [
+        || <?before \h* '=' [ \h | \w | \d | '"' ] { $*MAYBE-DECL := 1 }>
+        || <?>
+        ]
+    }
+
+    proto token value {*}
+    token value:sym<string>  { <?["]> <quote_EXPR: ':q'> }
+    token value:sym<integer> { '-'? \d+ }
+    token value:sym<number>  { '-'? \d+ '.' \d+ }
+
+    # See nqp/src/NQP/Grammar.nqp
+    my %multiplicative := nqp::hash('prec', 'u=', 'assoc', 'left');
+    my %additive       := nqp::hash('prec', 't=', 'assoc', 'left');
+    my %assignment     := nqp::hash('prec', 'j=', 'assoc', 'right');
+    token infix:sym<*> { <sym> <O(|%multiplicative, :op<mul_n>)> }
+    token infix:sym</> { <sym> <O(|%multiplicative, :op<div_n>)> }
+    token infix:sym<+> { <sym> <O(|%additive,       :op<add_n>)> }
+    token infix:sym<-> { <sym> <O(|%additive,       :op<sub_n>)> }
+    token infix:sym<=> { <sym> <O(|%assignment,     :op<bind>)> }
 
     # Whitespace required between alphanumeric tokens
     token ws { <!ww> \h* || \h+ }
+
+    # Reserved words.
+    token keyword {
+        [ BEGIN  | class    | ensure  | nil     | self    | when
+        | END    | def      | false   | not     | super   | while
+        | alias  | defined  | for     | or      | then    | yield
+        | and    | do       | if      | redo    | true
+        | begin  | else     | in      | rescue  | undef
+        | break  | elsif    | module  | retry   | unless
+        | case   | end      | next    | return  | until
+
+        | puts
+        ] <!ww>
+    }
+
+
 }
 
 class Rubyish::Actions is HLL::Actions {
     method TOP($/) {
-        make QAST::Block.new( $<statementlist>.ast );
+        $*CUR-BLOCK.push: $<statementlist>.ast;
+        make $*CUR-BLOCK;
     }
+
     method statementlist($/) {
         my $stmts := QAST::Stmts.new( :node($/) );
         for $<statement> {
@@ -26,15 +100,68 @@ class Rubyish::Actions is HLL::Actions {
         }
         make $stmts;
     }
+
+    method statement:sym<EXPR>($/) { make $<EXPR>.ast }
+
+    method statement:sym<def>($/) {
+        my $install := $<defbody>.ast;
+        $*CUR-BLOCK[0].push: QAST::Op.new:
+            :op<bind>,
+            QAST::Var.new(:name($install.name), :scope<lexical>, :decl<var>),
+            $install
+            ;
+        make QAST::Op.new: :op<null>;
+    }
+    method defbody($/) {
+        $*CUR-BLOCK.name: ~$<ident>;
+        $*CUR-BLOCK.push: $<statementlist>.ast;
+        make $*CUR-BLOCK;
+    }
+    method param($/) {
+        $*CUR-BLOCK[0].push: QAST::Var.new:
+            :name(~$<ident>), :scope<lexical>, :decl<param>;
+    }
+
     method statement:sym<puts>($/) {
         make QAST::Op.new(
             :op('say'),
-            $<quote_EXPR>.ast
+            $<EXPR>.ast
         );
     }
+
+    method term:sym<value>($/) { make $<value>.ast }
+
+    method term:sym<call>($/) {
+        my $call := QAST::Op.new: :op<call>, :name(~$<ident>);
+        for $<EXPR> {
+            $call.push: $_.ast
+        }
+        make $call;
+    }
+
+    method term:sym<ident>($/) {
+        my $name := ~$<ident>;
+        my %sym := $*CUR-BLOCK.symbol($name);
+        if $*MAYBE-DECL && !%sym<declared> {
+            $*CUR-BLOCK.symbol($name, :declared);
+            make QAST::Var.new: :$name, :scope<lexical>, :decl<var>;
+        }
+        else {
+            make QAST::Var.new: :$name, :scope<lexical>;
+        }
+    }
+
+    method value:sym<string>($/)  { make $<quote_EXPR>.ast }
+    method value:sym<integer>($/) { make QAST::IVal.new: :value(+~$/); }
+    method value:sym<number>($/)  { make QAST::NVal.new: :value(+~$/); }
 }
 
 class Rubyish::Compiler is HLL::Compiler {
+    method eval($code, *@args, *%adverbs) {
+        my $output := self.compile($code, :compunit_ok(1), |%adverbs);
+        $output := self.backend.compunit_mainline($output);
+        $output();
+    }
 }
 
 sub MAIN(*@ARGS) {
@@ -42,7 +169,7 @@ sub MAIN(*@ARGS) {
     $comp.language('rubyish');
     $comp.parsegrammar(Rubyish::Grammar);
     $comp.parseactions(Rubyish::Actions);
-    $comp.command_line(@ARGS, :encoding('utf8'));
+    $comp.command_line(@ARGS, :encoding('utf8'), :!rxtrace);
 }
 
 #:nnoremap <buffer> <Enter> :w<CR> \| :!%:p<CR>
