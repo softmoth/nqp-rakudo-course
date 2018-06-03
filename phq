@@ -14,18 +14,51 @@ grammar PHQ::Grammar is HLL::Grammar {
     token shəbang { '#!' \N* \n }
 
     rule statements {
-       <.ws>
-       <statement>+ % ';'
-       ';'?
+        ''
+        [ <statement> <.eat-terminator> ]*
+    }
+
+    token eat-terminator {
+        || ';'
+        # No semi-colon needed at end of a block
+        || <?MARKED('endstmt')>
+        # Or if this is the end of file
+        || $
     }
 
 
     proto token statement {*}
 
-    token statement:sym<EXPR> { <EXPR> }
+    token statement:sym<null> { '' <?[;]> }
 
     rule statement:sym<echo> {
         <sym> [ <?[(]> '(' <EXPR> ')' || <EXPR> ]
+    }
+
+    token statement:sym<EXPR> { <EXPR> }
+
+    rule statement:sym<function> {
+        <sym>
+        <funcname>
+        <funcbody>
+    }
+
+    rule funcbody {
+        :my $*CUR-BLOCK := QAST::Block.new: QAST::Stmts.new;
+        '(' <param>* % ',' ')'
+        <block>
+    }
+
+    token param { <varname> }
+
+    token block {
+        '{' <statements> '}' <?ENDSTMT>
+    }
+
+    token ENDSTMT {
+        [
+        <.eol> <.ws> <?MARKER('endstmt')>
+        ]?
     }
 
 
@@ -36,15 +69,17 @@ grammar PHQ::Grammar is HLL::Grammar {
 
 
     token term:sym<value> { <value> }
-    token term:sym<var> {
+
+    rule term:sym<call> { <funcname> '(' <EXPR>* % ',' ')'}
+
+    rule term:sym<var> {
         :my $*MAYBE-DECL := 0;
         <varname>
-        [  <?before \h* '=' \h* [ <value> | <identifier> ]
-                { $*MAYBE-DECL := 1 }>
-        || <?>
-        ]
+        [ <?before '='<![=]> { $*MAYBE-DECL := 1 }> || <?> ]
     }
-    token varname { '$' <.identifier> }
+
+    token varname { '$' <identifier> }
+    token funcname { <!keyword> <.identifier> }
     token identifier { <[_ A..Z a..z]> <[_ A..Z a..z 0..9]>* }
 
     # Operators
@@ -63,8 +98,17 @@ grammar PHQ::Grammar is HLL::Grammar {
 
 
     # Whitespace required between word tokens
-    token ws { <!ww> <.white>+ || <.white>* }
-    token white { \s+ || '//' \N+ \n }
+    token ws { <!ww> <.white>* }
+    token white { \s+ || <.comment> }
+    token comment { '//' \N+ \n }
+    token eol { \h* [ \n | <.comment> ] }
+    token keyword {
+        [
+        | if | elseif | else | while | for
+        | echo
+        ]
+        <!ww>
+    }
 }
 
 class PHQ::Actions is HLL::Actions {
@@ -82,6 +126,30 @@ class PHQ::Actions is HLL::Actions {
     }
 
 
+    method statement:sym<null>($/) { make QAST::Op.new: :op<null> }
+
+    method statement:sym<function>($/) {
+        my $name := ~$<funcname>;
+        my $install := $<funcbody>.ast;
+        $install.name($name);
+        $*CUR-BLOCK[0].push: QAST::Op.new:
+            :op<bind>,
+            QAST::Var.new(:$name, :scope<lexical>, :decl<var>),
+            $install;
+        make QAST::Op.new: :op<null>;
+    }
+
+    method funcbody($/) {
+        $*CUR-BLOCK.push($<block><statements>.ast);
+        make $*CUR-BLOCK;
+    }
+
+    method param($/) {
+        $*CUR-BLOCK[0].push: QAST::Var.new:
+            :name(~$<varname>), :scope<lexical>, :decl<param>;
+        $*CUR-BLOCK.symbol(~$<varname>, :declared);
+    }
+
     method statement:sym<EXPR>($/) { make $<EXPR>.ast }
 
     method statement:sym<echo>($/) {
@@ -98,6 +166,13 @@ class PHQ::Actions is HLL::Actions {
 
 
     method term:sym<value>($/) { make $<value>.ast }
+    method term:sym<call>($/) {
+        my $call := QAST::Op.new: :op<call>, :name(~$<funcname>);
+        for $<EXPR> {
+            $call.push: $_.ast;
+        }
+        make $call;
+    }
     method term:sym<var>($/) {
         my $name := ~$<varname>;
         my %sym := $*CUR-BLOCK.symbol($name);
