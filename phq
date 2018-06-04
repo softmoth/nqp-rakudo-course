@@ -262,18 +262,20 @@ class PHQ::Actions is HLL::Actions {
 }
 
 class PHQ::Compiler is HLL::Compiler {
-    # This avoids passing @args to $output(), which appears to be a
-    # bug in NQP(?). Without this fix, running `./phq test1.phq`
-    # errors with:
-    # Too many positionals passed; expected 0 arguments but got 1
-
-    # Taken from Pull Request #19:
-    # https://github.com/edumentab/rakudo-and-nqp-internals-course/pull/19/commits/f103137e136ffb0dd8014e1ed69e700daac56180
-
-    method eval($code, *@args, *%adverbs) {
+    method eval($code, *@_args, *%adverbs) {
         my $output := self.compile($code, :compunit_ok(1), |%adverbs);
-        $output := self.backend.compunit_mainline($output);
-        $output();
+
+        if %adverbs<target> eq '' {
+            my $outer_ctx := %adverbs<outer_ctx>;
+            $output := self.backend.compunit_mainline($output);
+            if nqp::defined($outer_ctx) {
+                nqp::forceouterctx($output, $outer_ctx);
+            }
+
+            $output := $output();
+        }
+
+        $output;
     }
 }
 
