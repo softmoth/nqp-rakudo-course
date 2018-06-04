@@ -118,7 +118,7 @@ class PHQ::Actions is HLL::Actions {
     }
 
     method statements($/) {
-        my $stmts := QAST::Stmts.new(:node($/));
+        my $stmts := QAST::Stmts.new: :node($/);
         for $<statement> {
             $stmts.push($_.ast);
         }
@@ -126,7 +126,7 @@ class PHQ::Actions is HLL::Actions {
     }
 
 
-    method statement:sym<null>($/) { make QAST::Op.new: :op<null> }
+    method statement:sym<null>($/) { make QAST::Op.new: :node($/), :op<null> }
 
     method statement:sym<function>($/) {
         my $name := ~$<funcname>;
@@ -136,17 +136,18 @@ class PHQ::Actions is HLL::Actions {
             :op<bind>,
             QAST::Var.new(:$name, :scope<lexical>, :decl<var>),
             $install;
-        make QAST::Op.new: :op<null>;
+        make QAST::Op.new: :node($/), :op<null>;
     }
 
     method funcbody($/) {
+        $*CUR-BLOCK.node($/);
         $*CUR-BLOCK.push($<block><statements>.ast);
         make $*CUR-BLOCK;
     }
 
     method param($/) {
         $*CUR-BLOCK[0].push: QAST::Var.new:
-            :name(~$<varname>), :scope<lexical>, :decl<param>;
+            :node($/), :name(~$<varname>), :scope<lexical>, :decl<param>;
         $*CUR-BLOCK.symbol(~$<varname>, :declared);
     }
 
@@ -161,13 +162,13 @@ class PHQ::Actions is HLL::Actions {
 
 
     method value:sym<string>($/)  { make $<quote_EXPR>.ast }
-    method value:sym<integer>($/) { make QAST::IVal.new: :value(+~$/) }
-    method value:sym<number>($/)  { make QAST::NVal.new: :value(+~$/) }
+    method value:sym<integer>($/) { make QAST::IVal.new: :node($/), :value(+~$/) }
+    method value:sym<number>($/)  { make QAST::NVal.new: :node($/), :value(+~$/) }
 
 
     method term:sym<value>($/) { make $<value>.ast }
     method term:sym<call>($/) {
-        my $call := QAST::Op.new: :op<call>, :name(~$<funcname>);
+        my $call := QAST::Op.new: :node($/), :op<call>, :name(~$<funcname>);
         for $<EXPR> {
             $call.push: $_.ast;
         }
