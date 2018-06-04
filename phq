@@ -27,6 +27,8 @@ grammar PHQ::Grammar is HLL::Grammar {
     }
 
 
+    # Statements
+
     proto token statement {*}
 
     token statement:sym<null> { '' <?[;]> }
@@ -51,7 +53,19 @@ grammar PHQ::Grammar is HLL::Grammar {
 
     token param { <varname> }
 
+    rule statement:sym<if> {
+        <sym>      '(' <EXPR> ')' <block>
+        [ 'elseif' '(' <EXPR> ')' <block> ]*
+        [ 'else'                  <else=.block> ]?
+    }
+
+    rule statement:sym<while> {
+        <sym> '(' <EXPR> ')' <block>
+    }
+
     token block {
+        # NB: Ensure no <.ws> is called between '}' and <?ENDSTMT>.
+        # It needs the newline for <.eol>
         '{' <statements> '}' <?ENDSTMT>
     }
 
@@ -62,11 +76,15 @@ grammar PHQ::Grammar is HLL::Grammar {
     }
 
 
+    # Literals
+
     proto token value {*}
     token value:sym<string>  { <?["]> <quote_EXPR: ':q', ':b'> }
     token value:sym<integer> { '-'? \d+ }
     token value:sym<number>  { '-'? \d+ '.' \d+ }
 
+
+    # EXPR syms
 
     token term:sym<value> { <value> }
 
@@ -78,6 +96,8 @@ grammar PHQ::Grammar is HLL::Grammar {
         [ <?before '='<![=]> { $*MAYBE-DECL := 1 }> || <?> ]
     }
 
+    rule term:sym<parenthesised> { '(' ~ ')' <EXPR> }
+
     token varname { '$' <identifier> }
     token funcname { <!keyword> <.identifier> }
     token identifier { <[_ A..Z a..z]> <[_ A..Z a..z 0..9]>* }
@@ -86,21 +106,35 @@ grammar PHQ::Grammar is HLL::Grammar {
     my %multiplicative := nqp::hash('prec', 'u=', 'assoc', 'left');
     my %additive       := nqp::hash('prec', 't=', 'assoc', 'left');
     my %concatenation  := nqp::hash('prec', 'r=', 'assoc', 'left');
+    my %relational     := nqp::hash('prec', 'm=', 'assoc', 'non');
     my %assignment     := nqp::hash('prec', 'i=', 'assoc', 'right');
 
     token infix:sym<*>    { <sym>  <O(|%multiplicative, :op<mul_n>)> }
     token infix:sym</>    { <sym>  <O(|%multiplicative, :op<div_n>)> }
     token infix:sym<%>    { <sym>  <O(|%multiplicative, :op<mod_n>)> }
+
     token infix:sym<+>    { <sym>  <O(|%additive,       :op<add_n>)> }
     token infix:sym<->    { <sym>  <O(|%additive,       :op<sub_n>)> }
-    token infix:sym<.>    { <sym>  <O(|%concatenation,  :op<concat>)> }
+
+    # PHP appears to not have a separate level for concatenation;
+    # e.g., this fails in PHP: echo "ok " . $foo + $bar;
+    token infix:sym<.>    { <sym>  <O(|%additive,  :op<concat>)> }
+
+    token infix:sym«==»   { <sym>  <O(|%relational, :op<iseq_n>)> }
+    token infix:sym«!=»   { <sym>  <O(|%relational, :op<isne_n>)> }
+    token infix:sym«<=»   { <sym>  <O(|%relational, :op<isle_n>)> }
+    token infix:sym«>=»   { <sym>  <O(|%relational, :op<isge_n>)> }
+    token infix:sym«<»    { <sym>  <O(|%relational, :op<islt_n>)> }
+    token infix:sym«>»    { <sym>  <O(|%relational, :op<isgt_n>)> }
+
     token infix:sym<=>    { <sym>  <O(|%assignment,     :op<bind>)> }
 
 
-    # Whitespace required between word tokens
+    # Misc
+
     token ws { <!ww> <.white>* }
     token white { \s+ || <.comment> }
-    token comment { '//' \N+ \n }
+    token comment { '//' \N* \n }
     token eol { \h* [ \n | <.comment> ] }
     token keyword {
         [
@@ -141,14 +175,52 @@ class PHQ::Actions is HLL::Actions {
 
     method funcbody($/) {
         $*CUR-BLOCK.node($/);
-        $*CUR-BLOCK.push($<block><statements>.ast);
+        $*CUR-BLOCK.push($<block>.ast);
         make $*CUR-BLOCK;
     }
+
+    method block($/) { make $<statements>.ast; }
 
     method param($/) {
         $*CUR-BLOCK[0].push: QAST::Var.new:
             :node($/), :name(~$<varname>), :scope<lexical>, :decl<param>;
         $*CUR-BLOCK.symbol(~$<varname>, :declared);
+    }
+
+    method statement:sym<if>($/) {
+        # Note: In PHP, blocks don't have their own scope; variables in a
+        # block seem to just get installed at global/function scope
+
+        nqp::die("Impossible: mismatched if/elseif tests and blocks")
+            unless +$<EXPR> == +$<block>;
+
+        sub make-if($n) {
+            my $if := QAST::Op.new:
+                    :op<if>,
+                    $<EXPR>[$n].ast,
+                    $<block>[$n].ast
+                    ;
+
+            if ($n + 1 < +$<EXPR>) {
+                $if.push: make-if($n + 1);
+            }
+            elsif ($<else>) {
+                $if.push: $<else>.ast;
+            }
+
+            $if;
+        }
+
+        make make-if(0);
+    }
+
+    method statement:sym<while>($/) {
+        # Again, no new scope for while in PHP
+        make QAST::Op.new:
+            :node($/),
+            :op<while>,
+            $<EXPR>.ast,
+            $<block>.ast
     }
 
     method statement:sym<EXPR>($/) { make $<EXPR>.ast }
@@ -185,6 +257,8 @@ class PHQ::Actions is HLL::Actions {
             make QAST::Var.new: :$name, :scope<lexical>;
         }
     }
+
+    method term:sym<parenthesised>($/) { make $<EXPR>.ast }
 }
 
 class PHQ::Compiler is HLL::Compiler {
