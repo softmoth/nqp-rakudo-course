@@ -5,12 +5,17 @@ other bits prompted by the text.
 
 # Reference
 
-- Course page: http://edumentab.github.io/rakudo-and-nqp-internals-course/
+- Course page: https://github.com/edumentab/rakudo-and-nqp-internals-course/#readme
 - NQP ops: https://github.com/perl6/nqp/blob/master/docs/ops.markdown
 
+# License
+
+Any code I've written here is in the public domain. Much of it is copied
+from the original course slides, which are under a
+[Creative Commons license][lic].
+
+[lic]: https://github.com/edumentab/rakudo-and-nqp-internals-course/blob/master/LICENSE
 
 # Course Errata
 
-Bugs can be filed at https://github.com/edumentab/rakudo-and-nqp-internals-course/issues
-
-## Unreported Bugs
+https://github.com/edumentab/rakudo-and-nqp-internals-course/issues
